@@ -1,0 +1,6 @@
+; $Id$ 
+name = Saffron Video
+description = Saffronvideo module to integrate with Saffron video server.
+package = Playback 
+version = "0.6"
+core = 6.x

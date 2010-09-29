@@ -1,0 +1,143 @@
+<?php
+// $Id$
+
+
+require_once('saffronvideo.class.inc');
+
+
+/**
+ * Helper to saffronvideo_form_alter(). Used to get default value of a form field.
+ */
+function _saffronvideo_form_alter_get_field_default_value($field) {
+  if (isset($field['#default_value']))
+    return $field['#default_value']['value'];
+  else if (isset($field[0]['#default_value']))
+    return $field[0]['#default_value']['value'];
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function saffronvideo_form_alter(&$form, &$form_values){
+  // add in video URI and thumbnail
+	if ('node-form' == $form['#id'] && SaffronVideoMgr::get_var(SaffronVideoMgr::VAR_CONTENT_TYPE_NAME) == $form['#node']->type) {
+    // the current video
+    $field_asset_id_name = SaffronVideoMgr::get_var(SaffronVideoMgr::VAR_FIELD_VIDEO_ASSET_ID);
+    $current_value = _saffronvideo_form_alter_get_field_default_value($form[$field_asset_id_name]);
+    unset($form[$field_asset_id_name]);
+
+    // get unused videos
+    $videos = SaffronVideoMgr::get_unused_videos(!empty($current_value) ? array($current_value) : array());
+
+    // now format data for output
+    $videos_to_show = array();
+    foreach ($videos as $v) {
+      $videos_to_show[$v->asset_id] = check_plain($v->asset_id);
+    }
+
+    // add video selection field
+    $form['saffron_video'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Saffron Video'),
+    );
+    $form['saffron_video'][SaffronVideoMgr::FIELD_VIDEO_ASSET_ID] = array(
+      '#type' => 'select',
+      '#title' => t('Video file'),
+      '#default_value' => $current_value,
+      '#options' => $videos_to_show,
+      '#description' => t('The name of the video file that was uploaded to the Saffron server.'),
+    );
+
+    // add video preview image
+    $form['saffron_video'][SaffronVideoMgr::FIELD_VIDEO_AUTOLOAD_THUMBNAIL_IMG] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Set video thumbnail as the preview image.'),
+      '#description' => t(
+        'If checked then the largest image
+          thumbnail available for this video from the Saffron server will be set as
+          the preview image for this node. This assumes that the preview image field has been setup properly in the
+           !link page.',array('!link' => l(t('saffronvideo admin settings'), 'admin/settings/saffronvideo'))
+      ),
+      '#default_value' => (1 == SaffronVideoMgr::get_var(SaffronVideoMgr::VAR_AUTO_ADD_VIDEO_THUMBNAIL_IMG_AS_PREVIEW_IMG) ? 1 : 0),
+    );
+
+
+    // override submit handler
+		$form['#submit'] = array('_saffronvideo_save_node_submit');
+	}
+}
+
+
+function _saffronvideo_save_node_submit($form, &$form_state) {
+	$values = $form_state['values'];
+
+  // set the video asset id
+  $values[SaffronVideoMgr::get_var(SaffronVideoMgr::VAR_FIELD_VIDEO_ASSET_ID)][0]['value'] = $values[SaffronVideoMgr::FIELD_VIDEO_ASSET_ID];
+
+  // auto-upload image?
+  $img_field_name = SaffronVideoMgr::get_var(SaffronVideoMgr::VAR_FIELD_PREVIEW_IMAGE_REF);
+  if ( 1 == $values[SaffronVideoMgr::FIELD_VIDEO_AUTOLOAD_THUMBNAIL_IMG] ) {
+    $v = SaffronVideoMgr::get_video($values[SaffronVideoMgr::FIELD_VIDEO_ASSET_ID]);
+    if ($v && !empty($v->images)) {
+      $img = array_shift($v->images);
+      // check to see if image is already 'uploaded'
+      $filename = basename($img[SaffronVideo::URL]);
+      $result = db_query("SELECT * FROM {files} WHERE filename = '%s' AND status = %d", $filename, FILE_STATUS_PERMANENT);
+      // file already available?
+      if (!($record = db_fetch_object($result))) {
+        $filepath = "sites/default/files/$filename";
+        if (!copy($img[SaffronVideo::URL], $filepath)) {
+          SaffronVideoMgr::log_error(t('Error downloading %src to %dst',array('%src' => $img[SaffronVideo::URL], '%dst' => $filepath)));
+        }
+        // add to db
+        global $user;
+        $record = (object)array(
+          'uid' => $user->uid,
+          'filename' => $filename,
+          'filepath' => $filepath,
+          'filemime' => file_get_mimetype($filename),
+          'filesize' => $img[SaffronVideo::BYTES],
+          'status' => FILE_STATUS_PERMANENT,
+          'timestamp' => time(),
+        );
+        drupal_write_record('files', $record);
+        SaffronVideoMgr::log(t('Downloaded %src to %dst and added to files table',array('%src' => $img[SaffronVideo::URL], '%dst' => $filepath)));
+      }
+      // set to field
+      $values[$img_field_name][0]['fid'] = $record->fid;
+      $values[$img_field_name][0]['filename'] = $record->filename;
+      $values[$img_field_name][0]['filepath'] = $record->filepath;
+      $values[$img_field_name][0]['filemime'] = $record->filemime;
+      $values[$img_field_name][0]['filesize'] = $record->filesize;
+      $values[$img_field_name][0]['destination'] = $record->filepath;
+    } // end if images available
+  } // end if auto-upload image selected
+
+  unset($values[SaffronVideoMgr::FIELD_VIDEO_ASSET_ID]);
+  unset($values[SaffronVideoMgr::FIELD_VIDEO_AUTOLOAD_THUMBNAIL_IMG]);
+
+	$form_state['values'] = $values;
+	menu_node_form_submit($form, $form_state);
+}
+
+
+/**
+ * Implementation of hook_menu().
+ */
+function saffronvideo_menu() {
+
+  $items['admin/settings/saffronvideo'] = array(
+    'title' => 'Saffron Video settings',
+    'description' => 'Change how saffronvideos are imported ',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('saffronvideo_admin_settings'),
+    'file' => 'saffronvideo.admin.inc',
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_NORMAL_ITEM
+  );
+
+  return $items;
+}
+
+
+
